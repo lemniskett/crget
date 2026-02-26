@@ -14,6 +14,7 @@ import logging
 import platform
 import base64
 import json
+import configparser
 
 
 logging.basicConfig(
@@ -39,6 +40,7 @@ def get_registry_metadata(registry_domain):
     logging.info(f"Fetching metadata for registry: {registry_domain}")
     registries = {
         'docker.io': {
+            'domain': 'docker.io',
             'registry_url_base': 'https://registry-1.docker.io/v2/',
             'auth_url': 'https://auth.docker.io/token',
             'service_name': 'registry.docker.io'
@@ -62,11 +64,17 @@ def get_registry_metadata(registry_domain):
     }
 
 
-def get_auth_headers(registry, image_name):
+def get_auth_headers(conf, registry, image_name):
     logging.info("Authenticating...")
     headers = {}
     auth_str = ""
-    registry_auth_file = os.environ.get('REGISTRY_AUTH_FILE')
+    registry_auth_file = ""
+
+    if os.environ.get('REGISTRY_AUTH_FILE'):
+        registry_auth_file = os.environ.get('REGISTRY_AUTH_FILE')
+    else:
+        registry_auth_file = conf.get('DEFAULT', {}).get('registry_auth_file')
+    
     if registry_auth_file:
         with open(registry_auth_file, 'r') as f:
             registry_auth = json.load(f)
@@ -74,6 +82,8 @@ def get_auth_headers(registry, image_name):
                 auth_str = registry_auth['auths'][registry['domain']]['auth']
             except KeyError:
                 logging.warning(f"No auth found for registry: {registry['domain']}, skipping registry auth file")
+            except FileNotFoundError:
+                logging.warning(f"Registry auth file not found: {registry_auth_file}, skipping registry auth file")
 
     username = os.environ.get('REGISTRY_USERNAME')
     password = os.environ.get('REGISTRY_PASSWORD')
@@ -158,12 +168,17 @@ Examples:
     )
     parser.add_argument("image_url", help="The full OCI image reference (e.g. registry.com/user/repo:tag)")
     parser.add_argument("output_path", nargs="?", default="", help="(Optional) Target file path or directory. If omitted, saves to the current directory using the image name.")
+    parser.add_argument("-c", "--config", type=str, default="/etc/crget.conf", help="Path to the crget config file")
     parser.add_argument("--ignore-arch", action="store_true", help="Ignore architecture check")
     parser.add_argument("--ignore-multi-layer", action="store_true", help="Ignore multi-layer check")
     parser.add_argument("--archive", action="store_true", help="Treat the image as an archive and extract it to the specified directory")
     parser.add_argument("--layer", type=int, default=-1, help="Download specified layer orders (negative for counting from the end)")
 
     args = parser.parse_args()
+
+    conf = configparser.ConfigParser()
+    conf.read(args.config)
+
     full_image = args.image_url
     provided_path = args.output_path
 
@@ -190,10 +205,10 @@ Examples:
     else:
         output_file = provided_path
 
-    logging.info(f"Target: {registry['service_name']} -> {image_name}:{image_tag}")
+    logging.info(f"Target: {registry['domain']} -> {image_name}:{image_tag}")
     logging.info(f"Output: {output_file}")
 
-    auth_headers = get_auth_headers(registry, image_name)
+    auth_headers = get_auth_headers(conf, registry, image_name)
     manifest = get_manifest(registry, auth_headers, image_name, image_tag, args.ignore_arch)
 
     layers = manifest.get("layers", [])
