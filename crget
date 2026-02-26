@@ -73,7 +73,7 @@ def get_auth_headers(conf, registry, image_name):
     if os.environ.get('REGISTRY_AUTH_FILE'):
         registry_auth_file = os.environ.get('REGISTRY_AUTH_FILE')
     else:
-        registry_auth_file = conf.get('DEFAULT', {}).get('registry_auth_file')
+        registry_auth_file = conf.get('DEFAULT', 'registry_auth_file')
     
     if registry_auth_file:
         with open(registry_auth_file, 'r') as f:
