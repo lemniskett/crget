@@ -235,7 +235,7 @@ Examples:
 
             if args.archive:
                 os.makedirs(output_file, exist_ok=True)
-                tar.extractall(output_file, filter=None)
+                tar.extractall(output_file, filter='data')
             else:
                 with tar.extractfile(members[0]) as source, open(output_file, "wb") as target:
                     shutil.copyfileobj(source, target)
