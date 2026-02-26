@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+
+import logging
+import os
+import sys
+import argparse
+import platform
+import tarfile
+import tempfile
+import shutil
+import requests
+import re
+import logging
+import platform
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s',
+)
+
+
+def get_arch():
+    arch = platform.machine().lower()
+    if arch in ('x86_64', 'amd64'):
+        return 'amd64'
+    elif arch in ('i386', 'i486', 'i586', 'i686', 'x86'):
+        return '386'
+    elif arch in ('aarch64', 'arm64'):
+        return 'arm64'
+    elif arch.startswith('arm'): 
+        return 'arm'
+    return arch
+
+
+def get_registry_metadata(registry_domain):
+    logging.info(f"Fetching metadata for registry: {registry_domain}")
+    registries = {
+        'docker.io': {
+            'registry_url_base': 'https://registry-1.docker.io/v2/',
+            'auth_url': 'https://auth.docker.io/token',
+            'service_name': 'registry.docker.io'
+        }
+    }
+    if registry_domain in registries:
+        return registries[registry_domain]
+
+    registry_url_base = f"https://{registry_domain}/v2/"
+    resp = requests.get(registry_url_base)
+    www_authenticate = resp.headers.get("Www-Authenticate")
+    params = dict(re.findall(r'(\w+)="([^"]+)"', www_authenticate))
+    realm = params.get("realm")
+    service = params.get("service")
+    if service == "container_registry":
+        service = registry_domain
+    
+    return {
+        'registry_url_base': registry_url_base,
+        'auth_url': realm,
+        'service_name': service
+    }
+
+
+def get_auth_headers(registry, image_name):
+    logging.info("Authenticating...")
+    token_url = f"{registry['auth_url']}?service={registry['service_name']}&scope=repository:{image_name}:pull"
+    try:
+        resp = requests.get(token_url)
+        resp.raise_for_status()
+        token = resp.json().get("token")
+    except requests.exceptions.RequestException:
+        logging.error("Authentication failed. Verify credentials or image existence.")
+        sys.exit(1)
+
+    if not token or token == "null":
+        logging.error("Could not retrieve a valid token.")
+        sys.exit(1)
+
+    return {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json'
+    }
+
+
+def get_manifest(registry, auth_headers, image_name, image_tag, ignore_arch):
+    logging.info("Fetching manifest...")
+
+    try:
+        resp = requests.get(f"{registry['registry_url_base']}/{image_name}/manifests/{image_tag}", headers=auth_headers)
+        resp.raise_for_status()
+        initial_json = resp.json()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch manifest: {e}")
+        sys.exit(1)
+
+    if "manifests" in initial_json:
+        arch = get_arch()
+        if not ignore_arch: 
+            logging.info(f"Manifest list detected. Resolving for linux/{arch}...")
+        
+        target_digest = None
+        for m in initial_json["manifests"]:
+            if m["platform"]["architecture"] == arch:
+                target_digest = m["digest"]
+                break
+        
+        if not target_digest:
+            if ignore_arch:
+                target_digest = initial_json["manifests"][0]["digest"]
+                logging.warning(f"Architecture mismatch. Using first available manifest: {target_digest}")
+            else:
+                logging.error(f"No manifest found for architecture {arch}. Use --ignore-arch to force download.")
+                sys.exit(1)
+        
+        logging.info(f"Downloading manifest: {target_digest}")
+        try:
+            resp = requests.get(f"{registry['registry_url_base']}/{image_name}/manifests/{target_digest}", headers=auth_headers)
+            resp.raise_for_status()
+            manifest = resp.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to fetch manifest: {e}")
+            sys.exit(1)
+    else:
+        manifest = initial_json
+
+    return manifest
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Downloads a binary from an OCI/Docker scratch image directly using the registry API.",
+        epilog="""
+Examples:
+  1. Explicit path:   %(prog)s docker.io/angelkawaii/pills /usr/local/bin/app
+  2. Directory only:  %(prog)s docker.io/angelkawaii/pills /tmp/
+  3. Auto-name:       %(prog)s docker.io/angelkawaii/pills
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("image_url", help="The full OCI image reference (e.g. registry.com/user/repo:tag)")
+    parser.add_argument("output_path", nargs="?", default="", help="(Optional) Target file path or directory. If omitted, saves to the current directory using the image name.")
+    parser.add_argument("--ignore-arch", action="store_true", help="Ignore architecture check")
+    parser.add_argument("--ignore-multi-layer", action="store_true", help="Ignore multi-layer check")
+    parser.add_argument("--archive", action="store_true", help="Treat the image as an archive and extract it to the specified directory")
+    parser.add_argument("--layer", type=int, default=-1, help="Download specified layer orders (negative for counting from the end)")
+
+    args = parser.parse_args()
+    full_image = args.image_url
+    provided_path = args.output_path
+
+    if ":" in full_image:
+        image_without_tag, image_tag = full_image.rsplit(":", 1)
+    else:
+        image_without_tag = full_image
+        image_tag = "latest"
+
+    if "/" not in image_without_tag:
+        logging.error("Invalid format. Image must contain a registry domain (e.g. registry.com/owner/image)")
+        sys.exit(1)
+
+    registry_domain, image_name = image_without_tag.split("/", 1)
+    registry = get_registry_metadata(registry_domain)
+
+    image_base_url = f"{registry['registry_url_base']}/{image_name}"
+    default_filename = image_name.split("/")[-1]
+
+    if not provided_path:
+        output_file = f"./{default_filename}"
+    elif os.path.isdir(provided_path):
+        output_file = os.path.join(provided_path, default_filename)
+    else:
+        output_file = provided_path
+
+    logging.info(f"Target: {registry['service_name']} -> {image_name}:{image_tag}")
+    logging.info(f"Output: {output_file}")
+
+    auth_headers = get_auth_headers(registry, image_name)
+    manifest = get_manifest(registry, auth_headers, image_name, image_tag, args.ignore_arch)
+
+    layers = manifest.get("layers", [])
+    if not layers:
+        logging.error("Could not find layers in manifest.")
+        sys.exit(1)
+
+    if len(layers) > 1 and not args.ignore_multi_layer and args.layer == -1:
+        logging.error("Multiple layers detected, use --ignore-multi-layer to ignore or --layer to download a specific layer")
+        sys.exit(1)
+
+    layer_digest = layers[args.layer].get("digest")
+    logging.info(f"Downloading blob: {layer_digest}")
+
+    output_dir = os.path.dirname(os.path.abspath(output_file))
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        blob_url = f"{image_base_url}/blobs/{layer_digest}"
+        with requests.get(blob_url, headers=auth_headers, stream=True) as r:
+            r.raise_for_status()
+            
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                for chunk in r.iter_content(chunk_size=8192):
+                    tmp.write(chunk)
+                tmp_path = tmp.name
+
+        with tarfile.open(tmp_path, "r:gz") as tar:
+            members = tar.getmembers()
+            if len(members) == 0:
+                logging.error("No files detected in the last layer.")
+                os.remove(tmp_path)
+                sys.exit(1)
+            
+            if len(members) > 1 and not args.archive:
+                logging.error("Multiple files detected in the last layer. Use --archive to extract to a directory.")
+                os.remove(tmp_path)
+                sys.exit(1)
+
+            if args.archive:
+                os.makedirs(output_file, exist_ok=True)
+                tar.extractall(output_file)
+            else:
+                with tar.extractfile(members[0]) as source, open(output_file, "wb") as target:
+                    shutil.copyfileobj(source, target)
+
+        os.remove(tmp_path)
+        
+        logging.info(f"Success! Extracted to: {output_file}")
+
+    except Exception as e:
+        logging.error(f"Failed to download or extract blob: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
