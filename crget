@@ -54,6 +54,7 @@ def get_registry_metadata(registry_domain):
     service = params.get("service")
     
     return {
+        'domain': registry_domain,
         'registry_url_base': registry_url_base,
         'auth_url': realm,
         'service_name': service
@@ -63,11 +64,22 @@ def get_registry_metadata(registry_domain):
 def get_auth_headers(registry, image_name):
     logging.info("Authenticating...")
     headers = {}
+    auth_str = ""
+    registry_auth_file = os.environ.get('REGISTRY_AUTH_FILE')
+    if registry_auth_file:
+        with open(registry_auth_file, 'r') as f:
+            registry_auth = json.load(f)
+            try:
+                auth_str = registry_auth['auths'][registry['domain']]['auth']
+            except KeyError:
+                logging.warning(f"No auth found for registry: {registry['domain']}, skipping registry auth file")
+
     username = os.environ.get('REGISTRY_USERNAME')
     password = os.environ.get('REGISTRY_PASSWORD')
     if username and password:
         auth_str = base64.b64encode(f"{username}:{password}".encode()).decode('utf-8')
-        headers['Authorization'] = f"Basic {auth_str}"
+    
+    headers['Authorization'] = f"Basic {auth_str}"
 
     token_url = f"{registry['auth_url']}?service={registry['service_name']}&scope=repository:{image_name}:pull"
     try:
