@@ -200,7 +200,7 @@ Examples:
 
     if not provided_path:
         output_file = f"./{default_filename}"
-    elif os.path.isdir(provided_path):
+    elif os.path.isdir(provided_path) and not args.archive:
         output_file = os.path.join(provided_path, default_filename)
     else:
         output_file = provided_path
