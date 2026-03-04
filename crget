@@ -73,7 +73,10 @@ def get_auth_headers(conf, registry, image_name):
     if os.environ.get('REGISTRY_AUTH_FILE'):
         registry_auth_file = os.environ.get('REGISTRY_AUTH_FILE')
     else:
-        registry_auth_file = conf.get('DEFAULT', 'registry_auth_file')
+        try:
+            registry_auth_file = conf.get('DEFAULT', 'registry_auth_file')
+        except configparser.NoOptionError:
+            pass
     
     if registry_auth_file:
         with open(registry_auth_file, 'r') as f:
@@ -90,15 +93,16 @@ def get_auth_headers(conf, registry, image_name):
     if username and password:
         auth_str = base64.b64encode(f"{username}:{password}".encode()).decode('utf-8')
     
-    headers['Authorization'] = f"Basic {auth_str}"
+    if auth_str:
+        headers['Authorization'] = f"Basic {auth_str}"
 
     token_url = f"{registry['auth_url']}?service={registry['service_name']}&scope=repository:{image_name}:pull"
     try:
         resp = requests.get(token_url, headers=headers)
         resp.raise_for_status()
         token = resp.json().get("token")
-    except requests.exceptions.RequestException:
-        logging.error("Authentication failed. Verify credentials or image existence.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Authentication failed: {e}")
         sys.exit(1)
 
     if not token or token == "null":
