@@ -79,14 +79,14 @@ def get_auth_headers(conf, registry, image_name):
             pass
     
     if registry_auth_file:
-        with open(registry_auth_file, 'r') as f:
-            registry_auth = json.load(f)
-            try:
+        try:
+            with open(registry_auth_file, 'r') as f:
+                registry_auth = json.load(f)
                 auth_str = registry_auth['auths'][registry['domain']]['auth']
-            except KeyError:
-                logging.warning(f"No auth found for registry: {registry['domain']}, skipping registry auth file")
-            except FileNotFoundError:
-                logging.warning(f"Registry auth file not found: {registry_auth_file}, skipping registry auth file")
+        except KeyError:
+            logging.warning(f"No auth found for registry: {registry['domain']}, skipping registry auth file")
+        except FileNotFoundError:
+            logging.warning(f"Registry auth file not found: {registry_auth_file}, skipping registry auth file")
 
     username = os.environ.get('REGISTRY_USERNAME')
     password = os.environ.get('REGISTRY_PASSWORD')
